@@ -28,7 +28,7 @@ float view_scale = 15.0f;
 const float MIN_SCALE = 3.0f;
 const float MAX_SCALE = 40.0f;
 
-// ==================== 帧率计算 ====================
+// 帧率计算
 double fps = 0.0;
 int64 prev_time = 0;
 
@@ -37,21 +37,15 @@ Mat enhance_low_light(Mat &gray)
 {
     Mat enhanced;
 
-    // 1. 高斯去噪
     GaussianBlur(gray, gray, Size(3, 3), 0.5);
-
-    // 2. 直方图均衡化
     equalizeHist(gray, enhanced);
 
-    // 3. 顶帽 + 黑帽增强边缘
     Mat kernel = getStructuringElement(MORPH_RECT, Size(3, 3));
     Mat tophat, blackhat;
     morphologyEx(enhanced, tophat, MORPH_TOPHAT, kernel);
     morphologyEx(enhanced, blackhat, MORPH_BLACKHAT, kernel);
 
     enhanced = enhanced + tophat - blackhat;
-
-    // 4. 对比度归一化
     normalize(enhanced, enhanced, 0, 255, NORM_MINMAX);
 
     return enhanced;
@@ -188,14 +182,20 @@ void draw_auto_scale_track(Mat &dst)
         line(map, pts[i-1], pts[i], Scalar(0, 210, 255), 1);
     }
 
-    Point2f origin;
-    int ox = mapCx + (origin.x - centerX) * view_scale;
-    int oy = mapCy + (origin.y - centerY) * view_scale;
-    drawMarker(map, Point(ox, oy), Scalar(80,80,80), MARKER_CROSS, 10, 1);
     circle(map, pts.back(), 5, Scalar(0,0,255), -1);
 
     Rect roi(dst.cols - MAP_W - 10, dst.rows - MAP_H - 10, MAP_W, MAP_H);
     map.copyTo(dst(roi));
+}
+
+// ==================== 重置 ====================
+void reset_all()
+{
+    first_frame = true;
+    filtered_cam = {0,0};
+    global_pos = {0,0};
+    track_path.clear();
+    view_scale = 15.0f;
 }
 
 // ==================== 主绘制 ====================
@@ -205,14 +205,7 @@ void draw_optical_flow(Mat &frame, Mat &output)
     Mat gray;
     cvtColor(frame, gray, COLOR_BGR2GRAY);
 
-    // 暗光增强
     gray = enhance_low_light(gray);
-
-    int cx = output.cols / 2;
-    int cy = output.rows / 2;
-
-    line(output, Point(cx, 0), Point(cx, output.rows), Scalar(255,255,255), 1);
-    line(output, Point(0, cy), Point(output.cols, cy), Scalar(255,255,255), 1);
 
     if (first_frame)
     {
@@ -224,10 +217,8 @@ void draw_optical_flow(Mat &frame, Mat &output)
         return;
     }
 
-    // 计算光流
     calcOpticalFlowFarneback(prev_gray, gray, flow, 0.5, 2, 10, 2, 5, 1.1, 0);
 
-    // 画光流
     int step = 20;
     for (int y = 0; y < gray.rows; y += step)
     {
@@ -247,8 +238,8 @@ void draw_optical_flow(Mat &frame, Mat &output)
     update_global_pos(cam_smooth);
     draw_auto_scale_track(output);
 
-    Point endp = Point(cx + cam_smooth.x*70, cy + cam_smooth.y*70);
-    arrowedLine(output, Point(cx,cy), endp, Scalar(0,0,255), 3, LINE_AA);
+    Point endp = Point(output.cols/2 + cam_smooth.x*70, output.rows/2 + cam_smooth.y*70);
+    arrowedLine(output, Point(output.cols/2,output.rows/2), endp, Scalar(0,0,255), 3, LINE_AA);
 
     char buf[100];
     sprintf(buf, "X: %.2f", cam_smooth.x);
@@ -261,7 +252,6 @@ void draw_optical_flow(Mat &frame, Mat &output)
     putText(output, buf, Point(30,180), FONT_HERSHEY_SIMPLEX, 1, Scalar(0,0,255), 2);
     draw_speed_bar(output, speed, 30, 230);
 
-    // ==================== 显示 FPS ====================
     char fps_text[30];
     sprintf(fps_text, "FPS: %.1f", fps);
     putText(output, fps_text, Point(output.cols - 150, 50),
@@ -276,7 +266,6 @@ int main()
     VideoCapture cap(2);
     if (!cap.isOpened())
     {
-        cout << "摄像头打开失败" << endl;
         return -1;
     }
 
@@ -286,16 +275,19 @@ int main()
     prev_time = getTickCount();
     Mat frame;
 
-    while (waitKey(1) != 'q')
+    while (true)
     {
+        int key = waitKey(1);
+        if (key == 'q' || key == 27) break;
+        if (key == 'r' || key == 'R') reset_all();
+
         cap >> frame;
         if (frame.empty()) break;
 
         Mat out;
         draw_optical_flow(frame, out);
-        imshow("Drone Optical Flow | Low Light Enhanced", out);
+        imshow("Drone Optical Flow", out);
 
-        // 计算帧率
         int64 now = getTickCount();
         double time = (now - prev_time) / getTickFrequency();
         fps = 1.0 / time;
