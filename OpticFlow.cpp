@@ -6,27 +6,53 @@
 using namespace cv;
 using namespace std;
 
-// ==================== 全局参数 ====================
+// ==================== 全局 ====================
 Mat prev_gray;
 Mat flow;
 bool first_frame = true;
 
-// 滤波防抖
+// 滤波
 Point2f filtered_cam = {0, 0};
 const float ALPHA      = 0.12f;
 const float DEAD_ZONE  = 0.07f;
 const float MAX_SPEED  = 4.0f;
 
-// 无人机全局位置 + 轨迹
+// 轨迹
 vector<Point2f> track_path;
 Point2f global_pos = {0, 0};
 
-// 轨迹画布配置
+// 轨迹画布
 const int MAP_W = 320;
 const int MAP_H = 240;
-float view_scale = 15.0f;     // 基础缩放
+float view_scale = 15.0f;
 const float MIN_SCALE = 3.0f;
 const float MAX_SCALE = 40.0f;
+
+// ==================== 【暗光增强 + 形态学预处理】 ====================
+Mat enhance_low_light(Mat &gray)
+{
+    Mat enhanced;
+
+    // 1. 高斯去噪
+    GaussianBlur(gray, gray, Size(3, 3), 0.5);
+
+    // 2. 直方图均衡化 → 暗环境提亮最有效
+    equalizeHist(gray, enhanced);
+
+    // 3. 形态学：顶帽 + 黑帽 → 强化边缘
+    Mat kernel = getStructuringElement(MORPH_RECT, Size(3, 3));
+    Mat tophat, blackhat;
+    morphologyEx(enhanced, tophat, MORPH_TOPHAT, kernel);
+    morphologyEx(enhanced, blackhat, MORPH_BLACKHAT, kernel);
+
+    // 顶帽增强亮区，黑帽增强暗区
+    enhanced = enhanced + tophat - blackhat;
+
+    // 4. 二次对比度拉伸
+    normalize(enhanced, enhanced, 0, 255, NORM_MINMAX);
+
+    return enhanced;
+}
 
 // ==================== 光流运动计算 ====================
 Point2f calculate_camera_motion(Mat &flow)
@@ -61,7 +87,7 @@ Point2f calculate_camera_motion(Mat &flow)
     return cam;
 }
 
-// 低通滤波 + 死区
+// 低通滤波 + 死区防抖
 Point2f smooth_camera_motion(Point2f raw_cam)
 {
     float speed = hypot(raw_cam.x, raw_cam.y);
@@ -79,7 +105,7 @@ Point2f smooth_camera_motion(Point2f raw_cam)
     return filtered_cam;
 }
 
-// 工具
+// 工具函数
 float get_angle(Point2f v)
 {
     float a = atan2(v.y, v.x) * 180.0 / CV_PI;
@@ -105,12 +131,11 @@ void draw_speed_bar(Mat &img, float speed, int x, int y)
     rectangle(img, Rect(x, y, (int)(w*speed), h), Scalar(0,255,255), -1);
 }
 
-// ==================== 核心：自动缩放轨迹 ====================
+// ==================== 轨迹 ====================
 void update_global_pos(Point2f move)
 {
     global_pos += move;
     track_path.push_back(global_pos);
-    // 限制轨迹长度，防止无限堆积
     if(track_path.size() > 1200)
         track_path.erase(track_path.begin());
 }
@@ -122,7 +147,6 @@ void draw_auto_scale_track(Mat &dst)
 
     if(track_path.empty()) return;
 
-    // 1. 取出所有轨迹点，计算包围盒
     float minX = track_path[0].x, maxX = track_path[0].x;
     float minY = track_path[0].y, maxY = track_path[0].y;
     for(auto &p : track_path)
@@ -133,25 +157,21 @@ void draw_auto_scale_track(Mat &dst)
         maxY = max(maxY, p.y);
     }
 
-    // 2. 自动计算需要的缩放比例
     float rangeX = maxX - minX;
     float rangeY = maxY - minY;
     float rangeMax = max(rangeX, rangeY);
 
-    // 动态自适应缩放
     if(rangeMax > 0.1f)
     {
         view_scale = (MAP_W * 0.45f) / rangeMax;
         view_scale = clamp(view_scale, MIN_SCALE, MAX_SCALE);
     }
 
-    // 3. 中心点偏移，让轨迹居中
     float centerX = (minX + maxX) * 0.5f;
     float centerY = (minY + maxY) * 0.5f;
     int mapCx = MAP_W / 2;
     int mapCy = MAP_H / 2;
 
-    // 4. 转换坐标绘制轨迹
     vector<Point> pts;
     for(auto &p : track_path)
     {
@@ -160,32 +180,31 @@ void draw_auto_scale_track(Mat &dst)
         pts.emplace_back(px, py);
     }
 
-    // 画轨迹线
     for(int i = 1; i < pts.size(); i++)
     {
         line(map, pts[i-1], pts[i], Scalar(0, 210, 255), 1);
     }
 
-    // 原点十字
     Point2f origin;
     int ox = mapCx + (origin.x - centerX) * view_scale;
     int oy = mapCy + (origin.y - centerY) * view_scale;
     drawMarker(map, Point(ox, oy), Scalar(80,80,80), MARKER_CROSS, 10, 1);
-
-    // 当前无人机红点
     circle(map, pts.back(), 5, Scalar(0,0,255), -1);
 
-    // 贴到画面右下角
     Rect roi(dst.cols - MAP_W - 10, dst.rows - MAP_H - 10, MAP_W, MAP_H);
     map.copyTo(dst(roi));
 }
 
-// ==================== 光流主绘制 ====================
+// ==================== 主绘制 ====================
 void draw_optical_flow(Mat &frame, Mat &output)
 {
     output = frame.clone();
     Mat gray;
     cvtColor(frame, gray, COLOR_BGR2GRAY);
+
+    // ==================== 暗光增强（关键） ====================
+    gray = enhance_low_light(gray);
+
     int cx = output.cols / 2;
     int cy = output.rows / 2;
 
@@ -202,9 +221,10 @@ void draw_optical_flow(Mat &frame, Mat &output)
         return;
     }
 
+    // 计算光流
     calcOpticalFlowFarneback(prev_gray, gray, flow, 0.5, 2, 10, 2, 5, 1.1, 0);
 
-    // 绿色稀疏光流
+    // 画光流
     int step = 20;
     for (int y = 0; y < gray.rows; y += step)
     {
@@ -221,15 +241,12 @@ void draw_optical_flow(Mat &frame, Mat &output)
     float speed = hypot(cam_smooth.x, cam_smooth.y);
     string dir  = get_dir(cam_smooth, speed);
 
-    // 更新位置 + 自动缩放轨迹
     update_global_pos(cam_smooth);
     draw_auto_scale_track(output);
 
-    // 中心运动箭头
     Point endp = Point(cx + cam_smooth.x*70, cy + cam_smooth.y*70);
     arrowedLine(output, Point(cx,cy), endp, Scalar(0,0,255), 3, LINE_AA);
 
-    // 信息文本
     char buf[100];
     sprintf(buf, "X: %.2f", cam_smooth.x);
     putText(output, buf, Point(30,60), FONT_HERSHEY_SIMPLEX, 1, Scalar(0,255,255), 2);
@@ -265,7 +282,7 @@ int main()
 
         Mat out;
         draw_optical_flow(frame, out);
-        imshow("Drone Optical Flow | Auto Scale Track", out);
+        imshow("Drone Optical Flow | Low Light Enhanced", out);
     }
 
     cap.release();
