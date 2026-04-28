@@ -28,7 +28,11 @@ float view_scale = 15.0f;
 const float MIN_SCALE = 3.0f;
 const float MAX_SCALE = 40.0f;
 
-// ==================== 【暗光增强 + 形态学预处理】 ====================
+// ==================== 帧率计算 ====================
+double fps = 0.0;
+int64 prev_time = 0;
+
+// ==================== 暗光增强 + 形态学预处理 ====================
 Mat enhance_low_light(Mat &gray)
 {
     Mat enhanced;
@@ -36,19 +40,18 @@ Mat enhance_low_light(Mat &gray)
     // 1. 高斯去噪
     GaussianBlur(gray, gray, Size(3, 3), 0.5);
 
-    // 2. 直方图均衡化 → 暗环境提亮最有效
+    // 2. 直方图均衡化
     equalizeHist(gray, enhanced);
 
-    // 3. 形态学：顶帽 + 黑帽 → 强化边缘
+    // 3. 顶帽 + 黑帽增强边缘
     Mat kernel = getStructuringElement(MORPH_RECT, Size(3, 3));
     Mat tophat, blackhat;
     morphologyEx(enhanced, tophat, MORPH_TOPHAT, kernel);
     morphologyEx(enhanced, blackhat, MORPH_BLACKHAT, kernel);
 
-    // 顶帽增强亮区，黑帽增强暗区
     enhanced = enhanced + tophat - blackhat;
 
-    // 4. 二次对比度拉伸
+    // 4. 对比度归一化
     normalize(enhanced, enhanced, 0, 255, NORM_MINMAX);
 
     return enhanced;
@@ -202,7 +205,7 @@ void draw_optical_flow(Mat &frame, Mat &output)
     Mat gray;
     cvtColor(frame, gray, COLOR_BGR2GRAY);
 
-    // ==================== 暗光增强（关键） ====================
+    // 暗光增强
     gray = enhance_low_light(gray);
 
     int cx = output.cols / 2;
@@ -258,6 +261,12 @@ void draw_optical_flow(Mat &frame, Mat &output)
     putText(output, buf, Point(30,180), FONT_HERSHEY_SIMPLEX, 1, Scalar(0,0,255), 2);
     draw_speed_bar(output, speed, 30, 230);
 
+    // ==================== 显示 FPS ====================
+    char fps_text[30];
+    sprintf(fps_text, "FPS: %.1f", fps);
+    putText(output, fps_text, Point(output.cols - 150, 50),
+            FONT_HERSHEY_SIMPLEX, 1, Scalar(0, 255, 255), 2);
+
     prev_gray = gray.clone();
 }
 
@@ -274,7 +283,9 @@ int main()
     cap.set(CAP_PROP_FRAME_WIDTH, 1280);
     cap.set(CAP_PROP_FRAME_HEIGHT, 720);
 
+    prev_time = getTickCount();
     Mat frame;
+
     while (waitKey(1) != 'q')
     {
         cap >> frame;
@@ -283,6 +294,12 @@ int main()
         Mat out;
         draw_optical_flow(frame, out);
         imshow("Drone Optical Flow | Low Light Enhanced", out);
+
+        // 计算帧率
+        int64 now = getTickCount();
+        double time = (now - prev_time) / getTickFrequency();
+        fps = 1.0 / time;
+        prev_time = now;
     }
 
     cap.release();
