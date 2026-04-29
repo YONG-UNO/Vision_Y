@@ -3,36 +3,33 @@
 #include <vector>
 #include <cmath>
 #include <algorithm>
+
 using namespace cv;
 using namespace std;
 
-// ==================== 全局 ====================
+// ==================== 全局变量 ====================
 Mat prev_gray;
 Mat flow;
 bool first_frame = true;
 
-// 滤波
 Point2f filtered_cam = {0, 0};
 const float ALPHA      = 0.12f;
 const float DEAD_ZONE  = 0.07f;
 const float MAX_SPEED  = 4.0f;
 
-// 轨迹
 vector<Point2f> track_path;
 Point2f global_pos = {0, 0};
 
-// 轨迹画布
 const int MAP_W = 320;
 const int MAP_H = 240;
 float view_scale = 15.0f;
 const float MIN_SCALE = 3.0f;
 const float MAX_SCALE = 40.0f;
 
-// 帧率计算
 double fps = 0.0;
 int64 prev_time = 0;
 
-// ==================== 暗光增强 + 形态学预处理 ====================
+// ==================== 暗光增强 ====================
 Mat enhance_low_light(Mat &gray)
 {
     Mat enhanced;
@@ -51,7 +48,7 @@ Mat enhance_low_light(Mat &gray)
     return enhanced;
 }
 
-// ==================== 光流运动计算 ====================
+// ==================== 计算相机运动 ====================
 Point2f calculate_camera_motion(Mat &flow)
 {
     float sum_x = 0, sum_y = 0;
@@ -84,29 +81,27 @@ Point2f calculate_camera_motion(Mat &flow)
     return cam;
 }
 
-// 低通滤波 + 死区防抖
+// 平滑运动
 Point2f smooth_camera_motion(Point2f raw_cam)
 {
     float speed = hypot(raw_cam.x, raw_cam.y);
     if (speed < DEAD_ZONE)
     {
-        filtered_cam.x *= 0.8f;
-        filtered_cam.y *= 0.8f;
+        filtered_cam *= 0.8f;
         if (hypot(filtered_cam.x, filtered_cam.y) < DEAD_ZONE)
             filtered_cam = {0, 0};
         return filtered_cam;
     }
 
-    filtered_cam.x = filtered_cam.x * (1 - ALPHA) + raw_cam.x * ALPHA;
-    filtered_cam.y = filtered_cam.y * (1 - ALPHA) + raw_cam.y * ALPHA;
+    filtered_cam = filtered_cam * (1.0f - ALPHA) + raw_cam * ALPHA;
     return filtered_cam;
 }
 
-// 工具函数
+// 角度计算
 float get_angle(Point2f v)
 {
-    float a = atan2(v.y, v.x) * 180.0 / CV_PI;
-    return a < 0 ? a + 360 : a;
+    float a = atan2(v.y, v.x) * 180.0f / CV_PI;
+    return a < 0 ? a + 360.0f : a;
 }
 
 string get_dir(Point2f cam, float speed)
@@ -128,7 +123,7 @@ void draw_speed_bar(Mat &img, float speed, int x, int y)
     rectangle(img, Rect(x, y, (int)(w*speed), h), Scalar(0,255,255), -1);
 }
 
-// ==================== 轨迹 ====================
+// ==================== 更新位置 ====================
 void update_global_pos(Point2f move)
 {
     global_pos += move;
@@ -137,6 +132,7 @@ void update_global_pos(Point2f move)
         track_path.erase(track_path.begin());
 }
 
+// 绘制自动缩放的轨迹图
 void draw_auto_scale_track(Mat &dst)
 {
     Mat map = Mat::zeros(MAP_H, MAP_W, CV_8UC3);
@@ -161,7 +157,9 @@ void draw_auto_scale_track(Mat &dst)
     if(rangeMax > 0.1f)
     {
         view_scale = (MAP_W * 0.45f) / rangeMax;
-        view_scale = clamp(view_scale, MIN_SCALE, MAX_SCALE);
+        // 修复 clamp 兼容写法
+        if(view_scale < MIN_SCALE) view_scale = MIN_SCALE;
+        if(view_scale > MAX_SCALE) view_scale = MAX_SCALE;
     }
 
     float centerX = (minX + maxX) * 0.5f;
@@ -182,7 +180,8 @@ void draw_auto_scale_track(Mat &dst)
         line(map, pts[i-1], pts[i], Scalar(0, 210, 255), 1);
     }
 
-    circle(map, pts.back(), 5, Scalar(0,0,255), -1);
+    if(!pts.empty())
+        circle(map, pts.back(), 5, Scalar(0,0,255), -1);
 
     Rect roi(dst.cols - MAP_W - 10, dst.rows - MAP_H - 10, MAP_W, MAP_H);
     map.copyTo(dst(roi));
@@ -198,7 +197,7 @@ void reset_all()
     view_scale = 15.0f;
 }
 
-// ==================== 主绘制 ====================
+// ==================== 绘制光流 ====================
 void draw_optical_flow(Mat &frame, Mat &output)
 {
     output = frame.clone();
@@ -226,7 +225,8 @@ void draw_optical_flow(Mat &frame, Mat &output)
         {
             Point2f f = flow.at<Point2f>(y, x);
             if (hypot(f.x, f.y) < 0.15f) continue;
-            arrowedLine(output, Point(x,y), Point(x+f.x*2, y+f.y*2), Scalar(0,255,0), 1, LINE_AA);
+            arrowedLine(output, Point(x,y), Point(cvRound(x+f.x*2), cvRound(y+f.y*2)),
+                        Scalar(0,255,0), 1, LINE_AA);
         }
     }
 
@@ -238,8 +238,11 @@ void draw_optical_flow(Mat &frame, Mat &output)
     update_global_pos(cam_smooth);
     draw_auto_scale_track(output);
 
-    Point endp = Point(output.cols/2 + cam_smooth.x*70, output.rows/2 + cam_smooth.y*70);
-    arrowedLine(output, Point(output.cols/2,output.rows/2), endp, Scalar(0,0,255), 3, LINE_AA);
+    Point endp = Point(cvRound(output.cols/2 + cam_smooth.x*70),
+                       cvRound(output.rows/2 + cam_smooth.y*70));
+
+    arrowedLine(output, Point(output.cols/2,output.rows/2), endp,
+                Scalar(0,0,255), 3, LINE_AA);
 
     char buf[100];
     sprintf(buf, "X: %.2f", cam_smooth.x);
@@ -263,9 +266,10 @@ void draw_optical_flow(Mat &frame, Mat &output)
 // ==================== 主函数 ====================
 int main()
 {
-    VideoCapture cap(2);
+    VideoCapture cap(0);  // 摄像头序号：0=默认摄像头
     if (!cap.isOpened())
     {
+        cout << "摄像头打开失败！" << endl;
         return -1;
     }
 
